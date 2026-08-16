@@ -1,8 +1,7 @@
 site_name: 学习笔记
 site_description: 个人学习知识库
 
-# 创建 GitHub 仓库后，替换为实际地址，例如：
-# site_url: https://<用户名>.github.io/<仓库名>/
+site_url: https://theone123456.github.io/notes/
 
 theme:
   name: material
