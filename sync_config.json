@@ -1,0 +1,9 @@
+{
+  "sources": [
+    {
+      "path": "/Users/lc_mbp/Code/AI/Agent/Learn",
+      "name": "AI Agent 学习",
+      "include_exts": [".md", ".py"]
+    }
+  ]
+}
