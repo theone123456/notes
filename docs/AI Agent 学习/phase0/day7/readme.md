@@ -308,3 +308,182 @@ except Exception as e:
 1. **LLM vs 传统软件**：查询 vs 生成，"查不到" vs "编一个" -- 这是幻觉、无状态、概率性输出的共同根源
 2. **独立写 API 代码**：7 个要素缺一不可（import / load_dotenv / 客户端 / create / messages / 取 content / 异常处理）
 3. **两个易混淆已澄清**：模型最大输出限制（天花板）vs 服务商默认（自动值）；长尾知识（幻觉成因）vs 长尾 token（采样效果）
+
+---
+
+## 项目设计：LLMClient 结构设计
+
+> 来源：Step 3 思考任务 · 目的：在写代码前把类结构想清楚，后续 Day 8-12 逐步扩展
+
+### 设计起点：从散装到封装
+
+Day 2 和 Day 3 的代码是 `LLMClient` 的"散装版"--所有逻辑散在全局作用域：
+
+```text
+Day 2 散装流程：
+  load_dotenv → 创建 OpenAI 客户端 → create 调用 → 取 choices[0].message.content
+
+Day 3 多了一层：
+  messages 列表持久化在全局变量 → 每轮 append user → 调 API → append assistant
+```
+
+Step 3 要做的，就是把这些散装逻辑收拢进一个类，让 API Key、客户端、模型名、历史都成为对象的属性，调用行为成为对象的方法。
+
+### 属性设计
+
+| 属性 | 类型 | 在 `__init__` 确定 | 生命周期 | 说明 |
+|---|---|---|---|---|
+| `api_key` | str | 是 | 不变 | 从 `os.getenv` 读取，实例化后不再修改 |
+| `base_url` | str | 是 | 不变 | API 地址，支持 DeepSeek / 通义等兼容 OpenAI 格式的服务 |
+| `model` | str | 是 | 会话级不变 | 默认模型名；切换模型时重新实例化或后续给 `chat` 加覆盖参数 |
+| `messages` | list | 是（空列表） | 动态增长 | 本日预留为空列表占位；`__init__` 中可预设一条 system prompt 作为默认人设，user 消息由 `chat` 方法每次传入，不预设 |
+
+**关键认知**：
+1. `api_key` 和 `base_url` 一组定义了一个 OpenAI client，实例化后不再变
+2. `model` 是会话级默认值，不是"多轮中会变"--多轮中变的是 `messages`（历史增长）
+3. `messages` 预留空列表占位，Day 8 实现多轮管理时只需每轮拼接 user + assistant 到末尾
+
+### 方法设计
+
+| 方法 | 本日实现 | 功能 | 后续扩展 |
+|---|---|---|---|
+| `__init__` | ✅ | 从 `os.getenv` 读取 API Key、初始化 `openai.OpenAI` 客户端、设置 `base_url` 和默认 `model`、预留 `messages` 空列表 | Day 10：增加 token 统计属性 |
+| `chat` | ✅ | 接收 user 消息（str），构造 `[system, user]` 两条消息，调用 `client.chat.completions.create`，返回模型回复文本（str） | Day 8：维护多轮历史；Day 10：存 usage 到实例属性 |
+
+本日 `chat` 方法内部流程：
+
+```text
+chat(user_message: str) -> str
+  ├── 构造 messages = [system_prompt, {"role": "user", "content": user_message}]
+  ├── 调用 client.chat.completions.create(model=self.model, messages=messages)
+  └── 返回 response.choices[0].message.content
+```
+
+**为什么 `messages` 里放两条（system + user）而不是只有 user 一条？**
+- 只有 user 能用，但模型用默认行为回答，无法控制"怎么答"（人设/格式/边界）
+- Day 2 已实验验证：system prompt 改变模型回复风格（"毒舌但心软的助手"）
+- 所以本日 `chat` 方法内部应构造 `[system, user]` 两条消息
+
+### API Key 为什么不硬编码
+
+三个角度：
+
+| 角度 | 硬编码的问题 | 从环境变量读取的好处 |
+|---|---|---|
+| **安全** | 泄漏 = 直接经济损失（他人盗刷产生计费） | `.env` 文件不进版本控制，降低泄漏面 |
+| **使用** | 切换环境/模型要改代码 | 只改 `.env` 配置文件，不动代码 |
+| **版本控制** | 提交到 Git 后即使删除，Key 仍留在 Git 历史记录中，无法彻底清除 | `.env` 加入 `.gitignore`，Key 从不进入仓库 |
+
+> 一句话：API Key 从环境变量读取，是安全（防泄漏盗刷）、使用（方便切换）、版本控制（Git 历史无法删除）三个角度的共同要求。
+
+### 返回值设计与扩展性
+
+本日 `chat` 返回纯文本（str），调用方简单直接：`reply = client.chat("你好")`。
+
+后续 Day 10 要统计 token，不需要改返回值结构--`chat` 内部把 `response.usage` 存到实例属性即可：
+
+```python
+# 本日（Day 7）：返回 str
+def chat(self, user_message) -> str:
+    ...
+    return response.choices[0].message.content
+
+# Day 10 扩展：返回值不变，token 存实例属性
+def chat(self, user_message) -> str:
+    ...
+    self.total_tokens += response.usage.total_tokens  # 存到实例属性
+    return response.choices[0].message.content  # 仍返回 str
+```
+
+这样既不过度设计，也不锁死扩展。
+
+### 后续扩展路线图
+
+| Day | 扩展内容 | 改动位置 |
+|---|---|---|
+| 8 | 多轮对话历史管理：`messages` 动态维护 user + assistant | `chat` 方法 + `messages` 属性 |
+| 8 | `save` / `load` 历史持久化：存为 JSON | 新增方法 |
+| 9 | 异常处理与重试：`try/except` + 简单重试 | `chat` 方法内部 |
+| 10 | token 统计与成本估算：累计 `usage`、按模型单价估算 | `__init__` 增加 token 属性 + 新增方法 |
+
+## 项目设计记住三件事
+
+1. **封装的本质**：把散装的全局变量和流程收拢为对象的属性和方法，让状态有归属、行为有边界
+2. **属性分两类**：`__init__` 确定后不变的（api_key / base_url / model）vs 会动态增长的（messages）
+3. **扩展不锁死**：`chat` 返回 str 保持调用方简单，token 统计用实例属性存储，不改返回值结构
+
+---
+
+## Step 5 完成标志自测
+
+> 来源：Step 5 验收任务 · 目的：合上资料自测，确认本周核心概念和项目代码全部掌握
+
+### 自测题 1：本周学过的核心概念有哪些？用一句话概括每个知识点
+
+| Day | 核心概念 | 一句话概括 |
+|---|---|---|
+| 1 | LLM 基础认知 | LLM 是用 API 调用的文本生成服务，与传统软件"查询"不同，它是"预测"概率最高的文字序列 |
+| 2 | Chat Completions API | 发请求靠 `client.chat.completions.create`，取回复靠 `choices[0].message.content`，取 token 靠 `response.usage` |
+| 2 | system prompt | 开发者设的全局指令，管"怎么答"（人设/格式/边界），约束力是概率性的 |
+| 3 | 三角色分工 | system 设全局、user 提问、assistant 是历史回复由代码拼回 |
+| 3 | 无状态 API | 服务器不保存对话历史，"记忆"= 把历史装进 messages 重发的工程效果 |
+| 4 | token | 模型处理和计费的最小文本片段，tokenizer 按 vocab 切出来的产物，中文更贵 |
+| 4 | 上下文窗口 | 模型一次请求能处理的最大 token 数（输入+输出总和），超限报错或截断 |
+| 5 | temperature | 采样参数，缩放 logits 改变分布形状；T 小确定性高，T 大随机性强；不改变"知不知道"只改变"怎么选" |
+| 5 | top_p | 核采样参数，截断概率候选池范围；与 temperature 二选一，不建议同时调整 |
+| 5 | max_tokens | 限制输出长度，超过模型最大输出限制会报错，不设则用服务商默认值 |
+| 6 | 幻觉 | 模型生成看似合理但实际不正确的内容；根因是概率预测没有事实校验步骤 |
+| 6 | 缓解幻觉 | 五种手段对症下药：提示词约束、降 temperature、RAG、结构化输出、多次采样投票 |
+
+### 自测题 2：token、上下文窗口、幻觉、temperature 分别是什么含义？
+
+- **token**：模型处理和计费的最小文本片段。tokenizer 按 vocab 切文本，常见组合整个当一个 token，罕见组合被拆碎；中文因词表偏英文 + UTF-8 编码而更贵（经验公式 `prompt_tokens ≈ 字数 × 0.6 + 12`）
+- **上下文窗口**：模型一次请求能处理的最大 token 数（输入+输出总和），是模型架构层面的硬上限；超限时报错（请求阶段）或截断（生成阶段）；存在 lost in the middle 现象
+- **幻觉**：模型生成看似合理但实际不正确/虚构的内容；根因是概率预测没有事实校验步骤，模型永远会输出，不区分"知道"和"生成"；缓解要对症下药（提示词约束对"过时信息"无效，RAG 打在根因上）
+- **temperature**：采样参数，作用在 logits 上（softmax 之前）缩放原始分数差距；T 小则分布尖锐（确定性高），T 大则分布平坦（随机性强）；不改变模型"知道什么"，只改变"怎么选"；T=0 也不保证 100% 可复现（前向传播的浮点精度差异）
+
+### 自测题 3：system / user / assistant 三种角色有什么区别？为什么每次请求都要传完整历史？
+
+**三种角色的区别**：
+
+| 角色 | 谁产生 | 作用 | 数量 |
+|---|---|---|---|
+| system | 开发者设定 | 全局指令（人设/格式/边界/流程），优先级高但约束力是概率性的 | 通常 1 条，放 messages[0] |
+| user | 最终用户 | 提问/指令 | 数量和顺序无限制 |
+| assistant | 模型的历史回复 | **由你的代码负责拼回 messages**，服务器不保存对话历史 | 数量无限制，与 user 交替出现 |
+
+**为什么每次请求都要传完整历史**：
+
+Chat API 是**无状态**的--服务器处理完请求就忘掉一切。模型每轮"知道"什么，完全取决于本次请求的 messages 里装了什么。不传历史，模型当全新问题处理（Day 3 实验 1 验证）；传完整历史，模型才能"读懂"对话脉络（Day 3 实验 2 验证）。这也是多轮对话 prompt_tokens 线性增长（复利计费）的原因。
+
+### 自测题 4：API Key 为什么要从环境变量读取而不是硬编码？
+
+三个角度：
+
+1. **安全**：API Key 泄漏 = 直接经济损失（他人盗刷产生计费）；从环境变量读取 + `.env` 不进版本控制，降低泄漏面
+2. **使用**：切换环境/模型时只改 `.env` 配置文件，不动代码；硬编码则每次切换都要改源码
+3. **版本控制**：硬编码的 Key 提交到 Git 后，即使后续删除，Key 仍留在 Git 历史记录中无法彻底清除；`.env` 加入 `.gitignore` 后，Key 从不进入仓库
+
+### 自测题 5：`LLMClient` 的 `chat` 方法内部做了哪些事情？
+
+`chat` 方法接收一个 `str`（用户消息），内部完成三步：
+
+```text
+chat(user_prompt: str) -> str
+  1. 构造 messages：self.messages（含 system prompt） + 本次 user 消息，拼成临时列表
+  2. 调用 API：client.chat.completions.create(model=self.default_model, messages=messages)
+  3. 返回回复：response.choices[0].message.content（纯文本 str）
+```
+
+关键设计点：
+- 构造的是**临时列表**（`self.messages + [user]`），不污染实例属性 `self.messages`，保证多次调用不会出现连续 user 消息
+- `self.messages` 本日只含一条 system prompt，Day 8 扩展为动态维护多轮历史
+- 返回纯文本 `str`，调用方简单直接；Day 10 扩展 token 统计时把 `response.usage` 存到实例属性，不改返回值结构
+
+## 自测记住五件事
+
+1. **一条主线**：LLM 是概率预测器 -- 无状态、无记忆、无事实校验，"记忆"和"幻觉"都是这个机制的投影
+2. **token 是最小单位**：计费、上下文窗口、成本估算都以 token 为单位，中文更贵
+3. **三角色 + 无状态**：system 设全局、user 提问、assistant 由代码拼回；每次请求必须传完整历史
+4. **API Key 三角度**：安全（防盗刷）、使用（方便切换）、版本控制（Git 历史无法删除）
+5. **`chat` 方法三步**：构造临时 messages -> 调 API -> 返回纯文本 str
