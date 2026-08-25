@@ -228,3 +228,173 @@ message: Error code: 429 - {'error': {'code': 'SetLimitExceeded', 'message': 'Yo
 3. **本 provider 的 429 陷阱**：`SetLimitExceeded` 是配额用尽伪装的限流，不可重试；`Model*RateLimitExceeded` 才是真限流
 4. **读报错认 provider**：volcengine 文档链接暴露了真实链路--环境假设要用实测校准
 
+---
+
+## 编码节：分类捕获，给出清晰提示（Step 3）
+
+> 来源：Step 3 编码任务 · 产出：`llm_client_with_retry.py`（复制自 day8，本步改造 chat 的异常处理）
+
+### 设计要点
+
+**1. 测试场景是构造能力，不是源码修改**
+
+初版为了测错 Key 场景，把 `self.api_key = "test_api_key"` 硬编码进源码（review 拦下）--程序从此永远 401，正确 Key 的回归测试没法跑。修复：`__init__` 加可选参数，None 表示"用默认"：
+
+```python
+def __init__(self, ..., api_key: str | None = None) -> None:
+    self.api_key = api_key or os.getenv("API_KEY")
+```
+
+与 `error_experiments.py` 的 `create_client` 同款模式。教训：**测试场景要能"构造"出来，而不是"改"出来**。
+
+**2. except 分支结构（Step 1 顺序法则落地）**
+
+AuthenticationError（401，可执行提示：指向 .env）-> RateLimitError / APITimeoutError / APIConnectionError（Step 4 占位）-> Exception 兜底（不吞细节）。顺序验证：APITimeoutError（子类）在 APIConnectionError（父类）之前。
+
+**3. 占位分支不能静默**
+
+初版占位写的是 `pass`--Step 4 完成前若真发生超时，程序无任何输出直接返回 None，排查黑洞。占位也 print 一行（"重试逻辑 Step 4 实现"），保持可观测。
+
+### 验证（2026-08-24，双场景通过）
+
+```text
+场景 1（错 Key）：API Key 无效，请检查 .env 中的 API_KEY
+返回值 None；失败后历史长度 1
+
+场景 2（正确 Key，Day 8 回归）：
+第 1 轮正常回复；第 2 轮正确复述第 1 轮；save/load 往返一致 True
+```
+
+- 场景 1 的历史长度 1 = **错误路径不写历史**，Day 8 原子提交设计在错误分支的直接验证
+- 彩蛋：第 1 轮回复自称"由 Z.ai 训练"（Z.ai = 智谱国际品牌）--provider 之谜闭环：**模型是智谱 GLM，接入链路走火山方舟**，与实验 3 的报错证据互相印证
+
+### 本节记住三件事
+
+1. **测试场景靠构造不靠改**：可选参数 + "None = 默认"，错 Key 场景一行构造，源码零修改
+2. **占位也要可观测**：空 except 是排查黑洞，占位分支至少 print 一行
+3. **错误路径不写历史**：失败后 messages 长度不变，原子提交设计的免费红利
+
+---
+
+## 编码节：简单重试逻辑（Step 4）
+
+> 来源：Step 4 编码任务 · 产出：`llm_client_with_retry.py`（chat 升级为重试循环）
+
+### 控制流结构（唯一的结构性变化：循环包住 try/except）
+
+```python
+for attempt in range(max_retries + 1):      # 1 次首调 + N 次重试
+    reason = None                            # 每轮重置，防上一轮原因串台
+    try:
+        调 API -> append 历史 -> return result    # 成功必须立即返回
+    except 非瞬时错误:
+        print(提示); break                   # 立即放弃，零重试
+    except RateLimitError:                   # SetLimitExceeded 二次判断 -> break
+    except 瞬时错误:
+        reason = type(e).__name__            # 只记原因，不打印
+    # ---- 走到这里 = 本轮失败且可重试 ----
+    if attempt < max_retries:
+        print(f"第 {attempt + 1} 次重试，原因：{reason}")
+        sleep(time_interval); time_interval *= 2    # 指数退避 1s -> 2s -> 4s
+    else:
+        print(放弃提示)
+return None
+```
+
+三个关键设计：
+
+- **成功立即 return**：try 块内完成 append 后马上返回，绝不落入重试逻辑（见踩坑 Bug 1）
+- **reason 变量统一日志**：可重试分支只赋值不打印，循环底部统一打--每行日志同时带次数和原因，行数减半
+- **SetLimitExceeded 二次判断**：`(e.body or {}).get("error", {}).get("code", "")` 安全取出结构化 code，配额用尽直接 break（实验 4 样例 B 的落地）
+
+### 踩坑记录：review 拦下的四个 bug
+
+**Bug 1（最严重）：重构循环时丢了 `return result`**
+
+成功路径执行流推演：attempt 0 成功 -> 无 return -> 落到重试判断 -> 睡 1 秒 -> attempt 1 又调 API 又 append……直到 attempt 3。后果：**一次成功对话 = 4 次 API 调用（4 倍计费）+ 历史塞进 4 组重复问答 + 白睡 7 秒 + 返回 None**。
+
+拆开看：快照模式保住了（append 没挪到调用前，Day 8 的红利兑现），但 Step 3 原有的 return 在重构时丢了。教训：**把 try/except 装进循环时，先想清楚每条路径怎么退出**--成功 return、非瞬时 break、可重试落到底部，三条退出通道一个都不能少。
+
+**Bug 2：`client.completions.create` 少了 `chat.`**
+
+旧版补全接口吃 `prompt` 不吃 `messages`，所有对话必然落进兜底分支。重构时手滑删的--py_compile 查不出这类错误（属性存在、语法合法），只有真正跑一遍或 review 才能发现。
+
+**Bug 3：`timeout` 参数收了没接线**
+
+`self.timeout` 存了属性，但 `OpenAI()` 构造时没传--死属性。后果：场景 A（timeout=0.001 触发重试）根本触发不了。教训：**参数加了不等于生效，要检查消费点**。
+
+**Bug 4：`e.body["error"]["code"]` 裸访问**
+
+`e.body` 可能是 None（响应体非 JSON 时），except 块里再抛 KeyError 会直接炸出整个函数，连兜底都接不住。修复为链式安全取值。教训：**外部 API 的响应是系统边界，边界处必须防御**。
+
+### 验证（2026-08-24，三场景全绿）
+
+```text
+场景 A（timeout=0.001, max_retries=2）：
+第 1 次重试，原因：APITimeoutError
+第 2 次重试，原因：APITimeoutError
+连续失败 3 次（最后原因：APITimeoutError），放弃重试
+返回值 None；历史长度 1（失败不写历史）
+
+场景 B（错 Key, max_retries=3）：
+API Key 无效，请检查 .env 中的 API_KEY        <- 0 行重试日志
+返回值 None；历史长度 1
+
+场景 C（正常 + Day 8 回归）：
+返回值非空 True；历史长度 3；第 2 轮正确复述第 1 轮；往返一致 True
+```
+
+- 场景 B 是灵魂断言：**重试有判断力**，非瞬时错误零重试
+- 场景 C 的历史长度 3 是专门盯 Bug 1 的探针：若为 9 = 成功也在循环里重复调用（system + 4 组重复问答）
+
+### 本节记住四件事
+
+1. **成功立即 return**：循环包 try/except 后，成功路径的退出方式只有 return；忘了它就是 4 倍计费 + 历史污染 + 返回 None
+2. **快照模式 = 重试安全的根基**：局部 messages 快照 + 成功后原子提交，重试 N 次也不产生副作用
+3. **三条退出通道**：成功 return / 非瞬时 break / 可重试落底部--重构循环结构时逐条核对
+4. **边界处防御性访问**：e.body 来自外部响应，`(x or {}).get(...)` 链式取值；参数加了要检查消费点
+
+---
+
+## 验收节：完成标志自测（Step 5）
+
+> 原始作答：`self_test` · 2026-08-24 · 结果：一次通过 4 题（Q1/Q2/Q3/Q5），Q4 经 review 修正
+
+### 自测五题记录
+
+1. **四类常见错误的状态码、成因、处理策略？** -- 通过
+   - 401 AuthenticationError（Key 错，提示更新不重试）/ 无状态码 APITimeoutError（网络波动，重试）/ 5xx InternalServerError（服务器故障，重试）/ 429 RateLimitError（请求过频，重试）
+   - review 补充：这次补上了 Step 1 漏掉的"无状态码"一族；429 在本 provider 还需二次判断（SetLimitExceeded 不重试）--自己代码里写的逻辑，自测时漏了半句
+
+2. **为什么 401 不重试、429 重试？** -- 通过
+   - 修复 Key 需要用户主动更新配置，重试无效；限流是服务商缓解压力的措施，短期可恢复，指数间隔重试通常能解决
+   - 本质框架即时间性 vs 配置性（时间流逝能否改变现状）
+
+3. **重试为何有上限？间隔为何退避？** -- 通过，有亮点
+   - 上限：避免无效等待和阻塞，重试只救瞬时失败，长期失败要用户换办法
+   - 退避：避免日志暴打、CPU 冲高、服务未恢复时无效连打
+   - 亮点：大模型响应时间远超 0.1s，0.1s 间隔意味着上一次请求还没返回就又发起；review 补充：已被限流还持续施压是火上浇油，恢复只会更慢
+
+4. **返回 None 感知失败，Day 11 命令行界面够用吗？** -- 结论可辩，理由修正
+   - 前半对：`if reply is None` 感知失败
+   - 修正："命令行无法输出 None"不成立（`print(None)` 照常输出）；真正答案分两层：
+     - Day 11 基础 CLI **够用**：LLMClient 内部已 print 人类可读的错误细节，CLI 循环判断 None 即可让用户看到原因并继续
+     - 真正局限：**调用方无法程序化区分失败原因**（Key 错该退出、超时该提示重试），细节只在 print 流里不在返回值里；要差异化处理需抛自定义异常或返回错误码
+   - 一句话：print 是给人看的，接口才是给代码看的
+
+5. **except 顺序讲究？写反了会怎样？** -- 通过
+   - 子类在前父类在后；写反了子类被父类截胡，子类分支永不触发（死代码）
+   - 最阴险处：不报错、程序照常跑，只是行为与意图不符--静默 bug 比崩溃难查
+
+### 本节记住三件事
+
+1. **print 给人看，接口给代码看**：None 能感知失败但携带不了原因；程序化差异化处理靠异常/错误码，Day 11 会再遇到
+2. **429 永远要二次判断**：类名只告诉你"被拒"，结构化 code 才告诉你"为什么"（SetLimitExceeded vs Model*RateLimitExceeded）
+3. **退避的时序本质**：重试间隔必须长于"服务恢复所需时间"，0.1s 连打 = 上一次请求还没结束就再次施压
+
+### 完成标志
+
+> ✅ 填错 Key 时程序不崩溃，报错信息清晰 -- 已达成（Step 3 场景 1 + Step 4 场景 B 双重实证）
+
+
+
