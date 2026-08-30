@@ -9,6 +9,11 @@
       "path": "/Users/lc_mbp/Code/Test/pytest/pytest-chinese-doc",
       "name": "pytest 中文文档",
       "include_exts": [".md", ".py"]
+    },
+    {
+      "path": "/Users/lc_mbp/Code/AI/Agent/Testing",
+      "name": "大模型评测工程学习",
+      "include_exts": [".md", ".py"]
     }
   ]
 }
