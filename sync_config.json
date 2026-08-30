@@ -1,8 +1,13 @@
 {
   "sources": [
     {
-      "path": "/Users/lc_mbp/Code/AI/Agent/Development‌",
-      "name": "AI Agent 学习",
+      "path": "/Users/lc_mbp/Code/AI/Agent/Development",
+      "name": "AI Agent 开发学习",
+      "include_exts": [".md", ".py"]
+    },
+    {
+      "path": "/Users/lc_mbp/Code/Test/pytest/pytest-chinese-doc",
+      "name": "pytest 中文文档",
       "include_exts": [".md", ".py"]
     }
   ]

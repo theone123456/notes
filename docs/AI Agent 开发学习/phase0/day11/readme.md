@@ -152,3 +152,114 @@ clear      messages 重置为 [原始 system 消息]；4 个 usage 计数器不�
 3. **同一原则的应用要能识别**：Q4.1 与 Q4.3 都是"不猜用户意图，给足信息让用户决策"
 4. **留观察口不实现**：失败计数器是"连续 N 次退出"的前置条件，今天不做但设计时留位
 
+---
+
+## 编码节：主循环骨架与命令分发（Step 3）
+
+> 来源：Step 3 编码任务 · 产出：`chat_cli.py`（复制 day10 类文件，库导入 `from llm_client_with_usage import LLMClient`）· 初版功能全对，review 后重构掉 finally+flag 机关
+
+### 初版做对的四点
+
+1. **try 包住整个循环体**：Ctrl+C 可能打在 `chat()` 等 API 响应的几十秒里，而不只是 `input()` 处--try 范围必须覆盖等待期，这是本步最大的坑，一次做对
+2. flag + finally 达成了单一收尾出口的目标（虽然机关可以更少，见下）
+3. `match` 的字面量模式用法正确，没踩 bare-name capture 的坑（`case _` 兜底、`case "/exit"` 是字面量不是变量名）
+4. 失败路径 / 空输入 / 命令占位全部符合设计规格；收尾超前实现了 save+report
+
+### 重点：finally 里的 break 会吞掉在途异常
+
+**Python 的规则**：finally 子句里执行 `break` / `continue` / `return`，**正在传播的异常会被直接丢弃**。
+
+这不是笔误，是语言规范（Python 语言参考 finally 一节原文：If the finally clause raises another exception, the saved exception is set as its context... 而 break/return/continue 会**取消** exception propagation）。准确说：finally 里出现任何"离开 finally 的控制流语句"（break/continue/return）或抛出新异常，都会**取代**正在传播的原异常。
+
+**机制拆解**（对照初版代码走一遍）：
+
+```python
+# 初版形状
+try:
+    ...input/chat/match...          # ① 这里抛出 KeyboardInterrupt
+except KeyboardInterrupt:
+    print("键盘中断")                # ② except 接住，开始打印
+    exit_flag = True
+finally:
+    if exit_flag:                   # ③ 执行到这里时又来一个 Ctrl+C？
+        break                       #    若 ②③ 之间有在途异常，break 把它丢弃
+```
+
+关键在时间线。异常不是"点"，是**从抛出到被 except 接住的传播过程**：
+
+```text
+用户第 1 次 Ctrl+C ──→ 抛出 KeyboardInterrupt ──┐
+                                              ├─ 在途：正要进 except 分支
+恰好此刻用户第 2 次 Ctrl+C ──→ 新异常在途 ──────┘
+except 打印提示（第 1 个异常已被接住处理）
+finally 执行 break ──→ 第 2 个在途异常被无声丢弃 ──→ 干净退出
+```
+
+初版代码里，"带伤进 finally"只剩两类真实场景：
+
+- **Ctrl+C 打在 except 处理器执行期间**（正在 `print` 提示语时又来一记 Ctrl+C）-> 第二个 KeyboardInterrupt 在途 -> 进 finally -> `break` 把它丢弃 -> 碰巧得到想要的结果（干净退出）。**是运气不是设计**：如果 finally 里不是 break 而是一段耗时收尾（比如大文件写盘），第二个 Ctrl+C 会立刻从 finally 冒出，traceback 裸奔
+- **Ctrl+C 打在 finally 自己的 save()/report() 期间** -> 新异常从 finally 直接冒出，`break` 还没执行到 -> 穿出循环 -> 裸 traceback（快速双击 Ctrl+C 可复现）
+
+**本质**：finally 的语义是"无论怎样都要执行的补台代码"，它适合做**清理**（关文件、释放锁），不适合做**控制流决策**（用 flag 告诉它"这次要不要 break"）。把 break 塞进 finally，等于让补台代码兼职决定程序走向，而它兼职时随手丢弃在途异常。
+
+**教训**：`finally` 里出现 `break`/`continue`/`return` = 危险信号。见到就问一句：有没有在途异常会被这个控制流语句吞掉？
+
+### 重构：break 直接写，收尾放循环外
+
+flag + finally 的方案是"告诉 finally 该退出了"。但 **break 在 try 块内、match 分支内、except 块内都合法**--三种退出来源各自直接 break，收尾写在**循环外**：天然恰好执行一次，不需要 flag、不需要 finally，吞异常的陷阱消解于无形：
+
+```python
+while True:
+    try:
+        user_input = input("> ")     # try 包整个循环体（保住 Ctrl+C-during-API）
+        if not user_input.strip():   # 空输入/纯空白：边界校验，不值得烧 API
+            continue
+        match user_input:
+            case "/exit":
+                break                # 在 match 分支里 break，合法
+            case "/clear":
+                ...
+            case _:
+                reply = client.chat(user_input)
+                ...
+    except KeyboardInterrupt:
+        break                          # 在 except 块里 break，合法
+    except EOFError:
+        break
+    except Exception as e:
+        print(f"未知错误: {e}")
+        break
+
+# 循环外：唯一可能的退出后位置，收尾只出现一次
+client.save()
+client.report()
+```
+
+**这是 CLI 的教科书形状：每个退出源只负责 break，收尾只出现在循环之后。** 收尾代码不进 try/finally，反而不参与任何异常传播路径。初版功能等价，但 Step 4 要往循环体加 `/clear` 完整语义，底座越简单越好。
+
+### 其他记录点
+
+- **空白输入的决策**：空输入 `""` 和纯空白 `"   "` 都走 `continue`，不烧 API。定位是**系统边界处的输入校验**（Day 9 Bug 4 原则的正面应用）；与命令严格匹配不冲突--`/exit `（带尾空格）仍是聊天内容，命令匹配语义未变
+- **EOF 提示去术语化**：用户不知道 EOFError 是什么，提示写"收到 Ctrl+D（输入结束）"；Ctrl+C/D 的提示前补 `\n`，避免与 `> ` 提示符挤在同一行
+- **save 的异常保证由类提供**：设计规格写"收尾 save 用 try/except 包裹"，实际不包的原因--Day 10 的 `save()` 类内部已 catch 全部异常并打印"存储会话失败"。**要知道保证的提供者是谁**（这里由类保证，不是 CLI 层）；`report()` 缺价格 KeyError fail loudly 是 Day 10 的既定决策，不包
+- **CLI 模块顶层不套 `__main__` 守卫**：`client = LLMClient()` 和 while 在模块顶层 = import 即启动交互循环。可接受，因为没人 import 一个 CLI（它是程序本体）。Day 10 的守卫是为了"类被当库用"，两者性质不同--**守卫的必要性取决于"有没有人 import 我"**
+
+### 验证（2026-08-27，冒烟测试全绿，零 API 调用）
+
+| 测试 | 输入流 | 验证点 | 结果 |
+|---|---|---|---|
+| 空管道 | `printf "" |` | stdin 立即 EOF -> Ctrl+D 路径 -> save+report -> 干净退出 | ✅ |
+| 空行+空白+/exit | `\n   \n/exit` | 空行、纯空白被跳过，/exit 退出 | ✅（三个提示符、两行跳过）|
+| import 安全 | 启动即进 `> ` | day10 的场景测试未触发（`__main__` 守卫） | ✅ |
+| save 落盘 | 退出后检查 | `day11/history.json` 写入成功，落在运行目录 | ✅ |
+
+环境备注：系统 `python3` 缺 dotenv（ModuleNotFoundError），须用 `Learn/.venv/bin/python`（Day 1 的学习虚拟环境）。
+
+### 本节记住五件事
+
+1. **finally 里的 break/continue/return 会吞掉在途异常**：语言规范行为，不是 bug 但反直觉；finally 只做清理，不做控制流决策
+2. **CLI 教科书形状**：每个退出源直接 break，收尾只在循环之后--不需要 flag、不需要 finally
+3. **异常是传播过程不是点**：Ctrl+C 打在 except 执行期、finally 执行期都是真实场景；try 要包到能覆盖"等待期"的整个循环体
+4. **保证要知道提供者**：save 不抛异常是类的保证（Day 10 内部 catch），不是 CLI 运气好
+5. **`__main__` 守卫的判据**：有没有人 import 我--类文件必须有，CLI 程序本体不需要
+
