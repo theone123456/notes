@@ -44,6 +44,7 @@ CODE_LANG = {
     ".go": "go",
     ".java": "java",
     ".sql": "sql",
+    ".html": "html",
 }
 
 # 整串匹配即脱敏的密钥形态

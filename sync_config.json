@@ -13,7 +13,7 @@
     {
       "path": "/Users/lc_mbp/Code/AI/Agent/Testing",
       "name": "大模型评测工程学习",
-      "include_exts": [".md", ".py"]
+      "include_exts": [".md", ".py", ".html"]
     }
   ]
 }
