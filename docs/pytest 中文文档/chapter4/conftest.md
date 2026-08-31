@@ -37,4 +37,17 @@ def smtp_connection_fin(request):
 
     request.addfinalizer(fin)
     return smtp_connection
+
+@pytest.fixture(scope='module')
+def smtp_connection_request(request):
+    server, port = getattr(request.module, 'smtp_server', ("smtp.163.com", 25))
+    with smtplib.SMTP(server, port) as smtp_connection:
+        yield smtp_connection
+        print(f"close {server}: {port}")
+
+@pytest.fixture(scope='module', params=['smtp.163.com', 'mail.python.org'])
+def smtp_connection_params(request):
+    server = request.param
+    with smtplib.SMTP(server, 587, timeout=5) as smtp_connection:
+        yield smtp_connection
 ```

@@ -16,3 +16,4 @@
    - 将`return`关键字替换成`yield`，`yield`之后可以添加清理代码
       - 支持`with`写法的对象可以执行隐式清理操作
    - `fixture`能够接收一个`request`参数，表示**测试请求的上下文**，可以使用`request.addfinalizer`为`fixture`添加清理操作
+   - 在`yield`之前或者`addfinalizer`注册之前代码发生错误退出，都不会再执行后续的清理操作

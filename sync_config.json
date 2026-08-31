@@ -11,9 +11,19 @@
       "include_exts": [".md", ".py"]
     },
     {
+      "path": "/Users/lc_mbp/Code/Test/pytest/plan",
+      "name": "pytest 八股文",
+      "include_exts": [".md", ".py"]
+    },
+    {
       "path": "/Users/lc_mbp/Code/AI/Agent/Testing",
       "name": "大模型评测工程学习",
       "include_exts": [".md", ".py", ".html"]
+    },
+    {
+      "path": "/Users/lc_mbp/Code/Python/plan",
+      "name": "python 八股文",
+      "include_exts": [".md", ".py"]
     }
   ]
 }
