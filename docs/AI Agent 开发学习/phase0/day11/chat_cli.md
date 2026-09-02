@@ -9,7 +9,7 @@ client = LLMClient()
 
 print("=" * 40)
 print("命令行聊天已启动")
-print("命令：/exit 退出 · /clear 清空会话历史")
+print("命令：/exit 退出 · /clear 清空会话 · /resume 恢复上次会话")
 print("=" * 40)
 
 while True:
@@ -26,7 +26,16 @@ while True:
                 print("退出进程")
                 break
             case "/clear":
-                print("清空会话")
+                # A 语义：重置为"本会话原始"system（当前首条）——人设随会话状态走（Q3 镜像原则）
+                cleared = len(client.messages) - 1
+                client.messages = client.messages[:1]
+                print(f"已清空 {cleared} 条对话，保留人设（当前 {len(client.messages)} 条消息）")
+            case "/resume":
+                # load 是整体替换：成功则当前未保存对话被丢弃，失败则原样保留
+                old_messages = client.messages
+                client.load()
+                if client.messages is not old_messages and len(old_messages) > 1:
+                    print(f"已丢弃当前未保存的 {len(old_messages) - 1} 条对话")
             case _:
                 reply = client.chat(user_input)
                 if reply is not None:
