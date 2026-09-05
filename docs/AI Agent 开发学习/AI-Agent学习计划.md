@@ -40,7 +40,7 @@
 | 核心参数：temperature、top_p、max_tokens | 【必须】 |
 
 **产出**：
-- [ ] 一个 Python 类 `LLMClient`，封装 API 调用，支持多轮对话并保存历史
+- [x] 一个 Python 类 `LLMClient`，封装 API 调用，支持多轮对话并保存历史（2026-09-05 · Day 8-12 逐日达成并超出基线：历史持久化、错误重试、token 统计与成本估算、命令行界面、11 用例测试、docs；仓库 github.com/theone123456/llm_client）
 
 ---
 

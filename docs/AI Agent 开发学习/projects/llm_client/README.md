@@ -73,4 +73,5 @@ pytest -m api     # 真实 API 套件（消耗 token，全套约 13 次调用）
 ```text
 llm_client/        # 包：client.py 客户端类 · cli.py 命令行入口
 tests/             # pytest 测试
+docs/              # 设计文档与测试用例说明
 ```
